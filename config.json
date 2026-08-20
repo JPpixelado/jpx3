@@ -1,0 +1,7 @@
+{
+  "system_name": "XMB-PY",
+  "store_server_url": "https://p1xelado.pythonanywhere.com",
+  "store_request_timeout": 12,
+  "fullscreen": false,
+  "wallpaper": null
+}
