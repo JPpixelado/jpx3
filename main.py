@@ -1,14 +1,15 @@
-"""XMB-PY — sistema com interface estilo XMB (PS3).
+"""XMB-PY 3.1 — sistema com interface estilo XMB (PS3).
 
 Recursos:
   - Login / registro na categoria Usuários
-  - Loja online com compra e download de jogos
-  - Wallpapers personalizados baixados da loja
+  - Loja Online em tela cheia (visual PS Store)
+  - Download e extração automática de jogos
+  - Wallpapers personalizados
+  - Atualizações automáticas (compara versões dos ZIPs no servidor)
   - Menu de pausa nos jogos (Esc)
 
 Executar:
     pip install -r requirements.txt
-    python server/app.py   # em outro terminal
     python main.py
 """
 import json
@@ -24,6 +25,8 @@ from xmb.dialog import text_input_dialog, confirm_dialog
 from store.client import StoreClient, StoreError
 from store import session as sess
 from games.registry import discover_games
+from xmb.store_ui import StoreUI
+from store.updater import Updater, get_local_version, parse_version
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.json"
@@ -37,6 +40,7 @@ def load_config():
         "store_request_timeout": 5,
         "fullscreen": False,
         "wallpaper": None,
+        "auto_update": True,
     }
     if CONFIG_PATH.exists():
         try:
@@ -306,6 +310,74 @@ def build_categories(config, store_client, engine_ref):
             )
         return items
 
+    def enter_store(engine, item):
+        """Abre a interface completa da loja (estilo PS Store)."""
+        engine.mode = "browse"
+
+        def on_game_installed(dest):
+            game_cat = next(c for c in engine.categories if c.id == "game")
+            game_cat.items = build_game_items()
+
+        def on_wp_installed(path):
+            engine.set_wallpaper(path)
+            cfg = load_config()
+            cfg["wallpaper"] = path
+            save_config(cfg)
+            _refresh_photo_category(engine)
+
+        clock = pygame.time.Clock()
+        ui = StoreUI(
+            engine.screen, clock, store_client,
+            on_install_game=on_game_installed,
+            on_install_wallpaper=on_wp_installed,
+        )
+        quit_app = ui.run()
+        if quit_app:
+            engine.running = False
+
+    def check_for_updates(engine, item):
+        """Verifica no servidor se há ZIP de versão mais nova e oferece instalar."""
+        updater = Updater(
+            config["store_server_url"],
+            timeout=config.get("store_request_timeout", 12),
+        )
+        engine.flash("Verificando atualizações…")
+        pygame.display.flip()
+        try:
+            latest = updater.latest_newer_than_local()
+        except Exception as exc:
+            engine.flash(f"Falha ao verificar: {exc}")
+            return
+
+        local = get_local_version()
+        if not latest:
+            engine.flash(f"Sistema atualizado (v{local}).")
+            return
+
+        clock = pygame.time.Clock()
+        ok = confirm_dialog(
+            engine.screen, clock,
+            "Atualização disponível",
+            f"Versão local: {local}  →  Nova: {latest.version}. Deseja baixar e instalar?",
+            yes_label="Atualizar", no_label="Depois",
+        )
+        if not ok:
+            engine.flash("Atualização adiada.")
+            return
+
+        try:
+            engine.flash(f"Baixando {latest.filename}…")
+            pygame.display.flip()
+            zip_path = updater.download(latest)
+            engine.flash("Aplicando atualização…")
+            pygame.display.flip()
+            written = updater.apply(zip_path, latest.version)
+            engine.flash(
+                f"Atualizado para v{latest.version} ({len(written)} arquivos). Reinicie o XMB-PY."
+            )
+        except Exception as exc:
+            engine.flash(f"Falha na atualização: {exc}")
+
     def open_settings(engine, item):
         engine.flash(f"'{item.name}' — em construção nesta demo.")
 
@@ -340,6 +412,9 @@ def build_categories(config, store_client, engine_ref):
                      {"description": "Ajustes de áudio do sistema."}, action=open_settings),
                 Item("network", "Rede", "Configuração de conexão", "network",
                      {"description": "Configurações de rede e servidor da loja."}, action=open_settings),
+                Item("update", "Atualizações", f"Versão {get_local_version()}", "settings",
+                     {"description": "Verifica no servidor se há uma versão mais nova do sistema (compara ZIPs como 2.0.zip e 4.0.zip)."},
+                     action=check_for_updates),
             ],
         ),
         Category(
@@ -363,8 +438,22 @@ def build_categories(config, store_client, engine_ref):
         Category("game", "Jogos", "game", items=build_game_items()),
         Category(
             "store", "Loja Online", "store",
-            items=[],
-            loader=lambda: store_client.load_items_as_xmb_items(on_action=on_store_action),
+            items=[
+                Item(
+                    "enter_store", "Entrar na Store", "XMB Store",
+                    "store",
+                    {"description": "Abre a interface completa da loja online — navegue, compre e baixe jogos e temas."},
+                    action=enter_store,
+                ),
+                Item(
+                    "store_web", "Abrir no navegador", "Site da loja",
+                    "network",
+                    {"description": f"Acesse a loja pelo navegador: {config.get('store_server_url', '')}"},
+                    action=lambda eng, it: eng.flash(
+                        f"Abra no navegador: {config.get('store_server_url', '')}"
+                    ),
+                ),
+            ],
         ),
         Category(
             "network", "Rede", "network",
@@ -373,7 +462,7 @@ def build_categories(config, store_client, engine_ref):
                     "status", "Status da Conexão", "", "network",
                     {"description": "Verifique a conectividade com o servidor da loja."},
                     action=lambda engine, item: engine.flash(
-                        "Servidor online ✓" if store_client.health() else "Servidor offline ✗"
+                        "Servidor online" if store_client.health() else "Servidor offline"
                     ),
                 ),
             ],
@@ -468,6 +557,22 @@ def main():
     user = sess.get_user()
     if user:
         engine.user_display = user.get("display_name") or user.get("username")
+
+    # Verificação silenciosa de atualização na inicialização
+    if config.get("auto_update", True):
+        try:
+            updater = Updater(
+                config["store_server_url"],
+                timeout=config.get("store_request_timeout", 12),
+            )
+            latest = updater.latest_newer_than_local()
+            if latest:
+                engine.flash(
+                    f"Nova versão disponível: v{latest.version} (atual: v{get_local_version()}). "
+                    "Vá em Configurações → Atualizações."
+                )
+        except Exception:
+            pass
 
     fullscreen = config.get("fullscreen", False)
 
