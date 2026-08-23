@@ -1,4 +1,4 @@
-"""Interface completa da Loja Online — visual inspirado na PS Store / XMB do PS3.
+"""Interface completa da Loja Online — visual inspirado na XMB.
 
 Aberta pelo item "Entrar na Store" na categoria Loja Online.
 """
@@ -39,7 +39,7 @@ def _wrap(text, font_obj, max_w):
 
 
 class StoreUI:
-    """Loja em tela cheia com grid de produtos estilo PS3."""
+    """Loja em tela cheia com grid de produtos."""
 
     def __init__(self, screen, clock, store_client: StoreClient, on_install_game=None, on_install_wallpaper=None):
         self.screen = screen
@@ -211,7 +211,7 @@ class StoreUI:
             self._draw_message(w, h)
 
     def _draw_background(self, w, h):
-        # Gradiente escuro estilo PS3
+        # Gradiente escuro
         top = pygame.Color(8, 14, 32)
         bottom = pygame.Color(2, 4, 12)
         for y in range(0, h, 3):

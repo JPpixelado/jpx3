@@ -42,7 +42,7 @@ def text_input_dialog(screen, clock, title, fields, submit_label="Confirmar"):
             if event.type == pygame.QUIT:
                 return None
             if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
+                if event.key in (pygame.K_ESCAPE, pygame.K_l):
                     return None
                 if event.key == pygame.K_TAB:
                     active = (active + 1) % len(fields)
@@ -126,11 +126,11 @@ def confirm_dialog(screen, clock, title, message, yes_label="Sim", no_label="Nã
             if event.type == pygame.QUIT:
                 return None
             if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
+                if event.key in (pygame.K_ESCAPE, pygame.K_l):
                     return False
                 if event.key in (pygame.K_LEFT, pygame.K_RIGHT, pygame.K_a, pygame.K_d, pygame.K_TAB):
                     selected = 1 - selected
-                if event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                if event.key in (pygame.K_RETURN, pygame.K_SPACE, pygame.K_k):
                     return selected == 0
 
         screen.blit(bg, (0, 0))
@@ -174,4 +174,65 @@ def confirm_dialog(screen, clock, title, message, yes_label="Sim", no_label="Nã
                 pygame.draw.rect(screen, (*theme.ACCENT, 40), (bx - 10, btn_y - 6, s.get_width() + 20, 32), border_radius=8)
             screen.blit(s, (bx, btn_y))
 
+        pygame.display.flip()
+
+
+def choice_dialog(screen, clock, title, options):
+    """Menu de opções vertical.
+
+    options: lista de (key, label)  ex.: [("play", "Jogar"), ("uninstall", "Desinstalar")]
+    Retorna a key escolhida, ou None se cancelar / fechar.
+    """
+    w, h = screen.get_size()
+    bg = screen.copy()
+    selected = 0
+    n = len(options)
+
+    panel_w = 420
+    panel_h = 110 + n * 48
+    px = (w - panel_w) // 2
+    py = (h - panel_h) // 2
+
+    while True:
+        clock.tick(theme.FPS)
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                return None
+            if event.type == pygame.KEYDOWN:
+                if event.key in (pygame.K_ESCAPE, pygame.K_l):
+                    return None
+                if event.key in (pygame.K_UP, pygame.K_w):
+                    selected = (selected - 1) % n
+                elif event.key in (pygame.K_DOWN, pygame.K_s):
+                    selected = (selected + 1) % n
+                elif event.key in (pygame.K_RETURN, pygame.K_SPACE, pygame.K_k):
+                    return options[selected][0]
+
+        screen.blit(bg, (0, 0))
+        overlay = pygame.Surface((w, h), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 160))
+        screen.blit(overlay, (0, 0))
+        _draw_panel(screen, px, py, panel_w, panel_h)
+
+        f_title = theme.font(22, bold=True)
+        t = f_title.render(title, True, theme.TEXT_COLOR)
+        screen.blit(t, (px + (panel_w - t.get_width()) // 2, py + 20))
+
+        y = py + 70
+        for i, (key, label) in enumerate(options):
+            is_sel = i == selected
+            color = theme.TEXT_COLOR if is_sel else theme.TEXT_DIM
+            f = theme.font(18, bold=is_sel)
+            s = f.render(label, True, color)
+            if is_sel:
+                pygame.draw.polygon(
+                    screen, theme.ACCENT,
+                    [(px + 36, y + 4), (px + 36, y + 18), (px + 48, y + 11)]
+                )
+            screen.blit(s, (px + 60, y))
+            y += 44
+
+        f_hint = theme.font(12)
+        hint = f_hint.render("↑ ↓   Enter confirmar   Esc cancelar", True, theme.TEXT_MUTED)
+        screen.blit(hint, (px + (panel_w - hint.get_width()) // 2, py + panel_h - 28))
         pygame.display.flip()

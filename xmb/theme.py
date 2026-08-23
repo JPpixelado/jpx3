@@ -1,4 +1,4 @@
-"""Tema visual inspirado na XMB (XrossMediaBar) do PlayStation 3 — versão aprimorada."""
+"""Tema visual inspirado na XMB (XrossMediaBar) — versão aprimorada."""
 import pygame
 
 pygame.font.init()

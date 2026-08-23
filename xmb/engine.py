@@ -1,4 +1,4 @@
-"""Núcleo da interface estilo XMB (PS3): navegação horizontal por categorias
+"""Núcleo da interface estilo XMB: navegação horizontal por categorias
 e vertical por itens, com painel de detalhes, partículas sutis e suporte a
 carregamento assíncrono de itens (usado pela categoria de Loja Online)."""
 import math
@@ -6,11 +6,13 @@ import time
 import threading
 import datetime
 import random
+from pathlib import Path
 
 import pygame
 
 from . import theme
 from .widgets import draw_icon
+from . import audio as xmb_audio
 
 
 class Item:
@@ -80,6 +82,23 @@ class XMBEngine:
         # Nome do usuário logado (exibido no canto)
         self.user_display = None
 
+        # Ícones dos botões de face (✕ □ ○ △)
+        self._btn_icons = {}
+        btn_dir = Path(__file__).resolve().parent / "images" / "buttons"
+        for key, fname in (
+            ("x", "x.png"),
+            ("square", "box.png"),
+            ("circle", "360.png"),
+            ("triangle", "triangle.png"),
+        ):
+            p = btn_dir / fname
+            if p.is_file():
+                try:
+                    img = pygame.image.load(str(p)).convert_alpha()
+                    self._btn_icons[key] = pygame.transform.smoothscale(img, (22, 22))
+                except pygame.error:
+                    pass
+
         # Partículas de fundo (pontos sutis)
         self.particles = [
             {
@@ -130,36 +149,110 @@ class XMBEngine:
     # ---------- eventos ----------
 
     def handle_event(self, event):
-        if event.type != pygame.KEYDOWN:
+        # Controles de face (estilo console):
+        #   ✕ (X)      = confirmar  → Enter / Espaço / K / botão 0
+        #   ○ (Círculo)= cancelar   → Esc / Backspace / L / botão 1
+        #   □ (Quadrado)= opções    → J / botão 2
+        #   △ (Triângulo)= menu     → I / botão 3
+        action = None  # move_left/right/up/down | confirm | cancel | square | triangle
+
+        if event.type == pygame.KEYDOWN:
+            k = event.key
+            if k in (pygame.K_RIGHT, pygame.K_d):
+                action = "move_right"
+            elif k in (pygame.K_LEFT, pygame.K_a):
+                action = "move_left"
+            elif k in (pygame.K_DOWN, pygame.K_s):
+                action = "move_down"
+            elif k in (pygame.K_UP, pygame.K_w):
+                action = "move_up"
+            elif k in (pygame.K_RETURN, pygame.K_SPACE, pygame.K_k):
+                action = "confirm"  # ✕
+            elif k in (pygame.K_ESCAPE, pygame.K_BACKSPACE, pygame.K_l):
+                action = "cancel"  # ○
+            elif k == pygame.K_j:
+                action = "square"  # □
+            elif k == pygame.K_i:
+                action = "triangle"  # △
+        elif event.type == pygame.JOYBUTTONDOWN:
+            # Mapeamento comum de gamepad (SDL):
+            # 0=A/✕  1=B/○  2=X/□  3=Y/△
+            btn = event.button
+            if btn == 0:
+                action = "confirm"
+            elif btn == 1:
+                action = "cancel"
+            elif btn == 2:
+                action = "square"
+            elif btn == 3:
+                action = "triangle"
+            elif btn == 13:
+                action = "move_up"
+            elif btn == 14:
+                action = "move_down"
+            elif btn == 15:
+                action = "move_left"
+            elif btn == 16:
+                action = "move_right"
+        elif event.type == pygame.JOYHATMOTION:
+            hx, hy = event.value
+            if hx < 0:
+                action = "move_left"
+            elif hx > 0:
+                action = "move_right"
+            elif hy > 0:
+                action = "move_up"
+            elif hy < 0:
+                action = "move_down"
+        else:
+            return
+
+        if action is None:
             return
 
         if self.mode == "browse":
-            if event.key in (pygame.K_RIGHT, pygame.K_d):
+            if action == "move_right":
                 self.cat_index = (self.cat_index + 1) % len(self.categories)
                 self.current_category().trigger_load()
-            elif event.key in (pygame.K_LEFT, pygame.K_a):
+                xmb_audio.play("hover")
+            elif action == "move_left":
                 self.cat_index = (self.cat_index - 1) % len(self.categories)
                 self.current_category().trigger_load()
-            elif event.key in (pygame.K_DOWN, pygame.K_s):
+                xmb_audio.play("hover")
+            elif action == "move_down":
                 cat = self.current_category()
                 if cat.items:
                     self.item_index[cat.id] = (self.item_index.get(cat.id, 0) + 1) % len(cat.items)
-            elif event.key in (pygame.K_UP, pygame.K_w):
+                    xmb_audio.play("hover")
+            elif action == "move_up":
                 cat = self.current_category()
                 if cat.items:
                     self.item_index[cat.id] = (self.item_index.get(cat.id, 0) - 1) % len(cat.items)
-            elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                    xmb_audio.play("hover")
+            elif action in ("confirm", "triangle"):
                 if self.selected_item() is not None:
                     self.mode = "detail"
-            elif event.key == pygame.K_ESCAPE:
+                    xmb_audio.play("select")
+            elif action == "square":
+                # Atalho: abrir detalhes do item selecionado
+                if self.selected_item() is not None:
+                    self.mode = "detail"
+                    xmb_audio.play("popup")
+            elif action == "cancel":
+                xmb_audio.play("confirm")
                 self.running = False
         elif self.mode == "detail":
-            if event.key in (pygame.K_ESCAPE, pygame.K_BACKSPACE):
+            if action == "cancel":
                 self.mode = "browse"
-            elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                xmb_audio.play("confirm")
+            elif action == "confirm":
                 item = self.selected_item()
                 if item and item.action:
+                    xmb_audio.play("select")
                     item.action(self, item)
+                else:
+                    xmb_audio.play("confirm")
+                    self.mode = "browse"
 
     # ---------- update ----------
 
@@ -419,16 +512,49 @@ class XMBEngine:
             price_surf = f_price.render(str(price), True, theme.OK_COLOR)
             surface.blit(price_surf, (px + 35, py + panel_h - 52))
 
-        hint = "Enter: confirmar    Esc: voltar" if item.action else "Esc: voltar"
+        hint = "✕ Confirmar    ○ Voltar" if item.action else "○ Voltar"
         f_hint = theme.font(14)
         hint_surf = f_hint.render(hint, True, theme.TEXT_MUTED)
         surface.blit(hint_surf, (px + panel_w - hint_surf.get_width() - 24, py + panel_h - 34))
 
+    def _draw_btn(self, surface, key, x, y):
+        icon = self._btn_icons.get(key)
+        if icon:
+            surface.blit(icon, (x, y))
+            return icon.get_width()
+        # fallback geométrico
+        if key == "x":
+            pygame.draw.line(surface, (120, 180, 255), (x + 4, y + 4), (x + 18, y + 18), 2)
+            pygame.draw.line(surface, (120, 180, 255), (x + 18, y + 4), (x + 4, y + 18), 2)
+        elif key == "circle":
+            pygame.draw.circle(surface, (255, 100, 100), (x + 11, y + 11), 8, 2)
+        elif key == "square":
+            pygame.draw.rect(surface, (255, 140, 200), (x + 4, y + 4, 14, 14), 2)
+        elif key == "triangle":
+            pygame.draw.polygon(surface, (100, 220, 140), [(x + 11, y + 3), (x + 20, y + 19), (x + 2, y + 19)], 2)
+        return 22
+
     def _draw_footer(self, surface, w, h):
         f = theme.font(13)
-        hint = "← → categorias    ↑ ↓ itens    Enter selecionar    Esc sair"
-        txt = f.render(hint, True, theme.TEXT_MUTED)
-        surface.blit(txt, (36, h - 38))
+        y = h - 40
+        x = 36
+
+        # Botões de face + legendas
+        pairs = [
+            ("x", "Confirmar"),
+            ("circle", "Voltar"),
+            ("square", "Opções"),
+            ("triangle", "Detalhes"),
+        ]
+        for key, label in pairs:
+            bw = self._draw_btn(surface, key, x, y)
+            x += bw + 6
+            txt = f.render(label, True, theme.TEXT_MUTED)
+            surface.blit(txt, (x, y + 3))
+            x += txt.get_width() + 22
+
+        nav = f.render("← → categorias   ↑ ↓ itens", True, theme.TEXT_MUTED)
+        surface.blit(nav, (w - nav.get_width() - 36, y + 3))
 
     def _draw_message(self, surface, w, h):
         f = theme.font(16, bold=True)
