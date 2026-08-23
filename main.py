@@ -1,12 +1,13 @@
-"""XMB-PY 3.1 — sistema com interface estilo XMB (PS3).
+"""XMB-PY 3.1 — sistema com interface estilo XMB.
 
 Recursos:
   - Login / registro na categoria Usuários
-  - Loja Online em tela cheia (visual PS Store)
+  - Loja Online em tela cheia (XMB Store)
   - Download e extração automática de jogos
   - Wallpapers personalizados
   - Atualizações automáticas (compara versões dos ZIPs no servidor)
   - Menu de pausa nos jogos (Esc)
+  - Configurações de vídeo, som e rede
 
 Executar:
     pip install -r requirements.txt
@@ -21,12 +22,14 @@ import pygame
 
 from xmb import theme
 from xmb.engine import XMBEngine, Category, Item
-from xmb.dialog import text_input_dialog, confirm_dialog
+from xmb.dialog import text_input_dialog, confirm_dialog, choice_dialog
 from store.client import StoreClient, StoreError
 from store import session as sess
-from games.registry import discover_games
+from games.registry import discover_games, uninstall_game
 from xmb.store_ui import StoreUI
 from store.updater import Updater, get_local_version, parse_version
+from xmb.boot import run_first_boot, run_startup
+from xmb import audio as xmb_audio
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.json"
@@ -41,6 +44,11 @@ def load_config():
         "fullscreen": False,
         "wallpaper": None,
         "auto_update": True,
+        "update_source": "auto",
+        "github_repo": "",
+        "github_token": "",
+        "volume": 80,
+        "first_boot_done": False,
     }
     if CONFIG_PATH.exists():
         try:
@@ -56,13 +64,61 @@ def save_config(config):
         json.dump(config, f, indent=2, ensure_ascii=False)
 
 
-def make_launch_action(run_func):
+def apply_fullscreen(engine, fullscreen):
+    engine.fullscreen = bool(fullscreen)
+    flags = pygame.FULLSCREEN if engine.fullscreen else pygame.RESIZABLE
+    screen = pygame.display.set_mode((theme.SCREEN_W, theme.SCREEN_H), flags)
+    engine.screen = screen
+
+
+def apply_volume(percent):
+    percent = max(0, min(100, int(percent)))
+    try:
+        if not pygame.mixer.get_init():
+            pygame.mixer.init()
+        pygame.mixer.music.set_volume(percent / 100.0)
+    except pygame.error:
+        pass
+    try:
+        xmb_audio.set_volume(percent)
+    except Exception:
+        pass
+    return percent
+
+
+def make_game_action(run_func, game_id, game_name):
+    """Ao confirmar um jogo: menu Jogar / Desinstalar."""
+
     def action(engine, item):
         engine.mode = "browse"
         clock = pygame.time.Clock()
-        quit_requested = run_func(engine.screen, clock)
-        if quit_requested:
-            engine.running = False
+        choice = choice_dialog(
+            engine.screen, clock,
+            game_name,
+            [
+                ("play", "Jogar"),
+                ("uninstall", "Desinstalar"),
+                ("cancel", "Cancelar"),
+            ],
+        )
+        if choice == "play":
+            quit_requested = run_func(engine.screen, clock)
+            if quit_requested:
+                engine.running = False
+        elif choice == "uninstall":
+            ok = confirm_dialog(
+                engine.screen, clock,
+                "Desinstalar",
+                f"Remover '{game_name}' deste aparelho?",
+                yes_label="Desinstalar", no_label="Cancelar",
+            )
+            if ok:
+                if uninstall_game(game_id):
+                    game_cat = next(c for c in engine.categories if c.id == "game")
+                    game_cat.items = build_game_items()
+                    engine.flash(f"'{game_name}' desinstalado.")
+                else:
+                    engine.flash("Não foi possível desinstalar o jogo.")
     return action
 
 
@@ -79,9 +135,9 @@ def build_game_items():
     for g in games:
         items.append(
             Item(
-                g["id"], g["name"], "Instalado", g.get("icon", "game"),
-                {"description": g["description"]},
-                action=make_launch_action(g["run"]),
+                g["id"], g["name"], "Instalado · Enter para opções", g.get("icon", "game"),
+                {"description": g["description"] + "\n\nEnter: Jogar ou Desinstalar."},
+                action=make_game_action(g["run"], g["id"], g["name"]),
             )
         )
     return items
@@ -311,7 +367,7 @@ def build_categories(config, store_client, engine_ref):
         return items
 
     def enter_store(engine, item):
-        """Abre a interface completa da loja (estilo PS Store)."""
+        """Abre a interface completa da XMB Store."""
         engine.mode = "browse"
 
         def on_game_installed(dest):
@@ -338,8 +394,11 @@ def build_categories(config, store_client, engine_ref):
     def check_for_updates(engine, item):
         """Verifica no servidor se há ZIP de versão mais nova e oferece instalar."""
         updater = Updater(
-            config["store_server_url"],
+            config.get("store_server_url", ""),
             timeout=config.get("store_request_timeout", 12),
+            source=config.get("update_source", "auto"),
+            github_repo=config.get("github_repo", ""),
+            github_token=config.get("github_token", ""),
         )
         engine.flash("Verificando atualizações…")
         pygame.display.flip()
@@ -378,8 +437,199 @@ def build_categories(config, store_client, engine_ref):
         except Exception as exc:
             engine.flash(f"Falha na atualização: {exc}")
 
-    def open_settings(engine, item):
-        engine.flash(f"'{item.name}' — em construção nesta demo.")
+    def _refresh_settings_category(engine):
+        cat = next(c for c in engine.categories if c.id == "settings")
+        cat.items = _build_settings_items()
+
+    def _build_settings_items():
+        cfg = load_config()
+        fs_label = "Tela cheia" if cfg.get("fullscreen") else "Janela"
+        vol = int(cfg.get("volume", 80))
+        url = cfg.get("store_server_url", "")
+        auto = "Ativado" if cfg.get("auto_update", True) else "Desativado"
+        src = cfg.get("update_source", "auto")
+        return [
+            Item(
+                "display", "Vídeo", fs_label, "settings",
+                {"description": f"Modo de exibição atual: {fs_label}. Resolução {theme.SCREEN_W}×{theme.SCREEN_H}. F11 também alterna tela cheia."},
+                action=do_video,
+            ),
+            Item(
+                "sound", "Som", f"Volume {vol}%", "settings",
+                {"description": "Volume geral do sistema (0 a 100)."},
+                action=do_sound,
+            ),
+            Item(
+                "network", "Rede", url.replace("https://", "").replace("http://", "")[:40], "network",
+                {"description": f"Servidor da loja: {url}\nTempo limite: {cfg.get('store_request_timeout', 12)} s."},
+                action=do_network,
+            ),
+            Item(
+                "auto_update", "Atualização automática", auto, "settings",
+                {"description": "Ao ligar o sistema, verifica se há uma versão mais nova."},
+                action=do_auto_update,
+            ),
+            Item(
+                "update_source", "Fonte de atualização", src, "settings",
+                {"description": "github = releases do repositório; store = API da loja; auto = tenta os dois."},
+                action=do_update_source,
+            ),
+            Item(
+                "update", "Verificar atualizações", f"Versão {get_local_version()}", "settings",
+                {"description": "Compara a versão local com os ZIPs publicados (ex.: 2.0.zip vs 4.0.zip) e instala a mais nova."},
+                action=check_for_updates,
+            ),
+        ]
+
+    def do_video(engine, item):
+        cfg = load_config()
+        clock = pygame.time.Clock()
+        choice = choice_dialog(
+            engine.screen, clock, "Vídeo",
+            [
+                ("full", "Tela cheia"),
+                ("window", "Janela"),
+                ("cancel", "Cancelar"),
+            ],
+        )
+        if choice not in ("full", "window"):
+            return
+        fs = choice == "full"
+        cfg["fullscreen"] = fs
+        save_config(cfg)
+        apply_fullscreen(engine, fs)
+        _refresh_settings_category(engine)
+        engine.flash("Tela cheia ativada." if fs else "Modo janela.")
+
+    def do_sound(engine, item):
+        cfg = load_config()
+        clock = pygame.time.Clock()
+        choice = choice_dialog(
+            engine.screen, clock, "Volume",
+            [
+                ("0", "Mudo (0%)"),
+                ("25", "Baixo (25%)"),
+                ("50", "Médio (50%)"),
+                ("75", "Alto (75%)"),
+                ("100", "Máximo (100%)"),
+                ("custom", "Personalizar…"),
+                ("cancel", "Cancelar"),
+            ],
+        )
+        if not choice or choice == "cancel":
+            return
+        if choice == "custom":
+            result = text_input_dialog(
+                engine.screen, clock, "Volume (0–100)",
+                [{"key": "volume", "label": "Volume", "value": str(int(cfg.get("volume", 80)))}],
+                submit_label="Aplicar",
+            )
+            if not result:
+                return
+            try:
+                vol = int(result["volume"])
+            except ValueError:
+                engine.flash("Informe um número entre 0 e 100.")
+                return
+        else:
+            vol = int(choice)
+        vol = apply_volume(vol)
+        cfg["volume"] = vol
+        save_config(cfg)
+        _refresh_settings_category(engine)
+        engine.flash(f"Volume definido para {vol}%.")
+
+    def do_network(engine, item):
+        cfg = load_config()
+        clock = pygame.time.Clock()
+        choice = choice_dialog(
+            engine.screen, clock, "Rede",
+            [
+                ("test", "Testar conexão"),
+                ("url", "Alterar URL da loja"),
+                ("timeout", "Tempo limite"),
+                ("cancel", "Cancelar"),
+            ],
+        )
+        if choice == "test":
+            engine.flash(
+                "Servidor online ✓" if store_client.health() else "Servidor offline ✗"
+            )
+        elif choice == "url":
+            result = text_input_dialog(
+                engine.screen, clock, "URL da loja",
+                [{"key": "url", "label": "Endereço", "value": cfg.get("store_server_url", "")}],
+                submit_label="Salvar",
+            )
+            if not result:
+                return
+            url = result["url"].strip().rstrip("/")
+            if not url.startswith("http"):
+                engine.flash("A URL deve começar com http:// ou https://")
+                return
+            cfg["store_server_url"] = url
+            save_config(cfg)
+            store_client.base_url = url
+            _refresh_settings_category(engine)
+            engine.flash(f"Loja apontando para {url}")
+        elif choice == "timeout":
+            result = text_input_dialog(
+                engine.screen, clock, "Tempo limite (segundos)",
+                [{"key": "timeout", "label": "Segundos", "value": str(cfg.get("store_request_timeout", 12))}],
+                submit_label="Salvar",
+            )
+            if not result:
+                return
+            try:
+                t = max(1, min(60, int(result["timeout"])))
+            except ValueError:
+                engine.flash("Informe um número válido.")
+                return
+            cfg["store_request_timeout"] = t
+            save_config(cfg)
+            store_client.timeout = t
+            _refresh_settings_category(engine)
+            engine.flash(f"Tempo limite: {t} s.")
+
+    def do_auto_update(engine, item):
+        cfg = load_config()
+        cfg["auto_update"] = not cfg.get("auto_update", True)
+        save_config(cfg)
+        _refresh_settings_category(engine)
+        engine.flash(
+            "Atualização automática ativada." if cfg["auto_update"] else "Atualização automática desativada."
+        )
+
+    def do_update_source(engine, item):
+        clock = pygame.time.Clock()
+        choice = choice_dialog(
+            engine.screen, clock, "Fonte de atualização",
+            [
+                ("github", "GitHub Releases"),
+                ("store", "Servidor da loja"),
+                ("auto", "Automático (GitHub + loja)"),
+                ("cancel", "Cancelar"),
+            ],
+        )
+        if not choice or choice == "cancel":
+            return
+        cfg = load_config()
+        cfg["update_source"] = choice
+        if choice in ("github", "auto"):
+            result = text_input_dialog(
+                engine.screen, clock, "Repositório GitHub",
+                [{"key": "repo", "label": "usuario/repositorio",
+                  "value": cfg.get("github_repo", "")}],
+                submit_label="Salvar",
+            )
+            if result:
+                cfg["github_repo"] = result["repo"].strip()
+        save_config(cfg)
+        _refresh_settings_category(engine)
+        engine.flash(f"Fonte de atualização: {choice}.")
+
+    def open_placeholder(engine, item):
+        engine.flash(f"'{item.name}' — em breve.")
 
     # Itens iniciais de usuários (serão atualizados após engine existir)
     user = sess.get_user()
@@ -405,17 +655,7 @@ def build_categories(config, store_client, engine_ref):
         Category("users", "Usuários", "user", items=user_items),
         Category(
             "settings", "Configurações", "settings",
-            items=[
-                Item("display", "Vídeo", "Resolução e tela cheia", "settings",
-                     {"description": "Ajustes de exibição do sistema."}, action=open_settings),
-                Item("sound", "Som", "Volume geral", "settings",
-                     {"description": "Ajustes de áudio do sistema."}, action=open_settings),
-                Item("network", "Rede", "Configuração de conexão", "network",
-                     {"description": "Configurações de rede e servidor da loja."}, action=open_settings),
-                Item("update", "Atualizações", f"Versão {get_local_version()}", "settings",
-                     {"description": "Verifica no servidor se há uma versão mais nova do sistema (compara ZIPs como 2.0.zip e 4.0.zip)."},
-                     action=check_for_updates),
-            ],
+            items=_build_settings_items(),
         ),
         Category(
             "photo", "Fotos", "photo",
@@ -425,14 +665,14 @@ def build_categories(config, store_client, engine_ref):
             "music", "Música", "music",
             items=[
                 Item("playlist1", "Minhas Faixas", "12 músicas", "music",
-                     {"description": "Biblioteca de música local."}, action=open_settings),
+                     {"description": "Biblioteca de música local."}, action=open_placeholder),
             ],
         ),
         Category(
             "video", "Vídeo", "video",
             items=[
                 Item("clips", "Meus Vídeos", "5 vídeos", "video",
-                     {"description": "Biblioteca de vídeos local."}, action=open_settings),
+                     {"description": "Biblioteca de vídeos local."}, action=open_placeholder),
             ],
         ),
         Category("game", "Jogos", "game", items=build_game_items()),
@@ -442,7 +682,7 @@ def build_categories(config, store_client, engine_ref):
                 Item(
                     "enter_store", "Entrar na Store", "XMB Store",
                     "store",
-                    {"description": "Abre a interface completa da loja online — navegue, compre e baixe jogos e temas."},
+                    {"description": "Abre a XMB Store em tela cheia — navegue, compre e baixe jogos e temas."},
                     action=enter_store,
                 ),
                 Item(
@@ -462,7 +702,7 @@ def build_categories(config, store_client, engine_ref):
                     "status", "Status da Conexão", "", "network",
                     {"description": "Verifique a conectividade com o servidor da loja."},
                     action=lambda engine, item: engine.flash(
-                        "Servidor online" if store_client.health() else "Servidor offline"
+                        "Servidor online ✓" if store_client.health() else "Servidor offline ✗"
                     ),
                 ),
             ],
@@ -532,11 +772,35 @@ def main():
     config = load_config()
 
     pygame.init()
+    pygame.joystick.init()
+    for i in range(pygame.joystick.get_count()):
+        try:
+            pygame.joystick.Joystick(i).init()
+        except pygame.error:
+            pass
+
     pygame.display.set_caption(config.get("system_name", "XMB-PY"))
 
     flags = pygame.FULLSCREEN if config.get("fullscreen") else pygame.RESIZABLE
     screen = pygame.display.set_mode((theme.SCREEN_W, theme.SCREEN_H), flags)
     clock = pygame.time.Clock()
+
+    # Áudio
+    xmb_audio.init(config.get("volume", 80))
+    apply_volume(config.get("volume", 80))
+
+    # Tela de inicialização
+    system_name = config.get("system_name", "XMB-PY")
+    if not config.get("first_boot_done", False):
+        if run_first_boot(screen, clock, system_name=system_name):
+            pygame.quit()
+            sys.exit(0)
+        config["first_boot_done"] = True
+        save_config(config)
+    else:
+        if run_startup(screen, clock, system_name=system_name):
+            pygame.quit()
+            sys.exit(0)
 
     store_client = StoreClient(
         config["store_server_url"],
@@ -562,8 +826,11 @@ def main():
     if config.get("auto_update", True):
         try:
             updater = Updater(
-                config["store_server_url"],
+                config.get("store_server_url", ""),
                 timeout=config.get("store_request_timeout", 12),
+                source=config.get("update_source", "auto"),
+                github_repo=config.get("github_repo", ""),
+                github_token=config.get("github_token", ""),
             )
             latest = updater.latest_newer_than_local()
             if latest:
@@ -603,6 +870,8 @@ def main():
         engine.draw()
         pygame.display.flip()
 
+    xmb_audio.play("shutdown")
+    pygame.time.wait(400)
     pygame.quit()
     sys.exit(0)
 
