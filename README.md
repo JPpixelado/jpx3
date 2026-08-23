@@ -41,3 +41,16 @@ A loja padrão aponta para `https://p1xelado.pythonanywhere.com`.
 | Enter | confirmar | detalhes / comprar |
 | Esc   | voltar / sair | voltar |
 | F11   | tela cheia | — |
+
+# Requisitos (Importante!)
+
+|  Recurso  |  Mínimo razoável  |  Recomendado  |
+|-----------|-------------------|---------------|
+|  SO       | "Windows 10, Linux ou macOS recentes" |  Windows 10/11 ou Linux atual  |
+|  Python   | 3.10+  |  3.11 ou 3.12 |
+|  CPU      | "Dual-core ~1,5 GHz" | Quad-core |
+| RAM       | ~512 MB livres (1 GB total) | 2 GB+ livres |
+| GPU / vídeo | Qualquer com aceleração OpenGL/SDL básica |Integrada moderna ok |
+| Disco | ~50–100 MB (app + jogos simples) | 1 GB+ (Mais se houver muitos jogos/wallpapers) |
+| Rede  | Opcional (só para loja e atualizações) | Conexão estável (se usar a store) |
+| Dependências | "pygame, requests" | "pygame, requests" também |
